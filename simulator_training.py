@@ -47,10 +47,30 @@ def main():
         help="Port to communicate with traffic manager (default: 8000)",
     )
     argparser.add_argument(
-        "-s", "--seed",
-        metavar="S",
+        "--seedt",
+        metavar="T",
         type=int,
         help="Set random device seed and deterministic mode for Traffic Manager"
+    )
+    argparser.add_argument(
+        "--seedw",
+        metavar="W",
+        type=int,
+        help="Set the seed for pedestrians module",
+    )
+    argparser.add_argument(
+        "--running",
+        metavar="R",
+        default=0.31,
+        type=float,
+        help="Percentage of pedestrians that will run",
+    )
+    argparser.add_argument(
+        "--crossing",
+        metavar="C",
+        default=0.47,
+        type=float,
+        help="Percentage of pedestrians that will walk on the road or cross at any point on the road",
     )
 
     args = argparser.parse_args()
@@ -59,10 +79,10 @@ def main():
 
     vehicles_list = []
     walkers_list = []
-    all_id = []
+    all_ids = []
     client = carla.Client(args.host, args.port)
     client.set_timeout(10.0)
-    random.seed(args.seed if args.seed is not None else int(time.time()))
+    random.seed(args.seedt if args.seedt is not None else int(time.time()))
     
     try:
         world = client.get_world()
@@ -72,8 +92,8 @@ def main():
         traffic_manager.set_hybrid_physics_mode(True)
         traffic_manager.set_hybrid_physics_radius(70.0)
         traffic_manager.set_synchronous_mode(True)
-        if args.seed is not None:
-            traffic_manager.set_random_device_seed(args.seed)
+        if args.seedt is not None:
+            traffic_manager.set_random_device_seed(args.seedt)
 
         settings = world.get_settings()
         if not settings.synchronous_mode:
@@ -83,6 +103,7 @@ def main():
         else:
             synchronous_master = False
         world.apply_settings(settings)
+        world.set_pedestrians_cross_factor(args.crossing)
 
         blueprints = world.get_blueprint_library()
         vehicle_blueprints = blueprints.filter("vehicle.*")
@@ -131,6 +152,86 @@ def main():
 
         #endregion
 
+
+        #region Spawn Walkers
+        if args.seedw:
+            world.set_pedestrians_seed(args.seedw)
+            random.seed(args.seedw)
+
+        spawn_points = []
+        for _ in range(args.number_of_walkers):
+            spawn_point = carla.Transform()
+            loc = world.get_random_location_from_navigation()
+            if (loc != None):
+                spawn_point.location = loc
+                spawn_points.append(spawn_point)
+        
+        # spawn walker objects
+        batch = []
+        walker_speeds = []
+        for spawn_point in spawn_points:
+            walker_blueprint = random.choice(walker_blueprints)
+            if walker_blueprint.has_attribute("is_invincible"):
+                walker_blueprint.set_attribute("is_invincible", "false")
+            if walker_blueprint.has_attribute("can_use_wheelchair") and random.randint(0, 100) <= 11:
+                walker_blueprint.set_attribute("use_wheelchair", "true")
+                
+            if walker_blueprint.has_attribute("speed"):
+                if random.random() > args.running:
+                    # walking
+                    walker_speeds.append(walker_blueprint.get_attribute("speed").recommended_values[1])
+                else:
+                    # running
+                    walker_speeds.append(walker_blueprint.get_attribute("speed").recommended_values[2])
+            else:
+                walker_speeds.append(0.0)
+            
+            batch.append(SpawnActor(walker_blueprint, spawn_point))
+
+        successful_walker_speeds = []
+        responses = client.apply_batch_sync(batch, synchronous_master)
+        for i in range(len(responses)):
+            if responses[i].error:
+                logging.error(responses[i].error)
+            else:
+                walkers_list.append({"id": responses[i].actor_id})
+                successful_walker_speeds.append(walker_speeds[i])
+        walker_speeds = successful_walker_speeds
+
+        # spawn walker controllers
+        batch = []
+        walker_controller_blueprint = world.get_blueprint_library().find("controller.ai.walker")
+        for i in range(len(walkers_list)):
+            batch.append(SpawnActor(walker_controller_blueprint, carla.Transform(), walkers_list[i]["id"]))
+        responses = client.apply_batch_sync(batch, synchronous_master)
+        for i in range(len(responses)):
+            if responses[i].error:
+                logging.error(responses[i].error)
+            else:
+                walkers_list[i]["con"] = responses[i].actor_id
+        
+        for i in range(len(walkers_list)):
+            # controller id first because step by 2 starting at 0 for starting in loop below
+            all_ids.append(walkers_list[i]["con"])
+            all_ids.append(walkers_list[i]["id"])
+
+        if not synchronous_master:
+            world.wait_for_tick()
+        else:
+            world.tick()
+
+        all_actors = world.get_actors(all_ids)
+        for i in range(0, len(all_ids), 2):
+            all_actors[i].start()
+            all_actors[i].go_to_location(world.get_random_location_from_navigation())
+            all_actors[i].set_max_speed(float(walker_speeds[int(i/2)]))
+
+        logging.info(f"Spawned {len(walkers_list)} walkers, press Ctrl+C to exit")
+
+        #endregion
+
+        traffic_manager.global_percentage_speed_difference(-7.0)
+
         while True:
             if synchronous_master:
                 world.tick()
@@ -144,8 +245,14 @@ def main():
             settings.fixed_delta_seconds = None
             world.apply_settings(settings)
         
-        logging.info(f"Destroying {len(vehicles_list)}")
+        logging.info(f"Destroying {len(vehicles_list)} vehicles")
         client.apply_batch([DestroyActor(x) for x in vehicles_list])
+
+        for i in range(0, len(all_ids), 2):
+            all_actors[i].stop()
+
+        logging.info(f"Destroying {len(walkers_list)} walkers")
+        client.apply_batch([DestroyActor(x) for x in all_ids])
 
         time.sleep(0.5)
 
