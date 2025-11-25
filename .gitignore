@@ -11,3 +11,5 @@ LICENSE
 README
 
 venv/
+
+__pycache__
