@@ -1,7 +1,3 @@
-#1/usr/bin/env python
-
-"""Script to setup parameters and generate world for data gathering"""
-
 import carla
 from carla.command import SpawnActor, SetAutopilot, FutureActor, DestroyActor
 
@@ -9,6 +5,8 @@ import argparse
 import logging
 import random
 import time
+
+from util import weather_dict
 
 def main():
     argparser = argparse.ArgumentParser(description=__doc__)
@@ -29,6 +27,12 @@ def main():
         "-m", "--map",
         metavar="M",
         help="Name of map to load in world"
+    )
+    argparser.add_argument(
+        "--weather",
+        metavar="W",
+        default="CloudyNoon",
+        help="Carla weather preset"
     )
     argparser.add_argument(
         "-n", "--number-of-vehicles",
@@ -96,6 +100,10 @@ def main():
             if args.map not in client.get_available_maps():
                 raise ValueError("Could not find any map with the given name")
             world = client.load_world(args.map)
+
+        if args.weather not in weather_dict:
+            raise ValueError("Unknown Carla weather preset")
+        world.set_weather(weather_dict[args.weather])
 
         traffic_manager = client.get_trafficmanager(args.tm_port)
         traffic_manager.set_global_distance_to_leading_vehicle(2.5)
